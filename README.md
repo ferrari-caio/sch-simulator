@@ -1,1 +1,1 @@
-# Surgar Cane Harvesting Simulator
+# Sugar Cane Harvesting Simulator
