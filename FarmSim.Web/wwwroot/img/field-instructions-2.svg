@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450" role="img" aria-label="Instruction image 2">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#fef2f2"></stop>
+      <stop offset="1" stop-color="#fee2e2"></stop>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="450" fill="url(#bg)"></rect>
+  <rect x="30" y="30" width="740" height="390" rx="14" fill="#ffffff" opacity="0.75"></rect>
+  <path d="M210 300 L340 170" fill="none" stroke="#c62828" stroke-width="10" stroke-linecap="round"></path>
+  <circle cx="210" cy="300" r="12" fill="#fff" stroke="#c62828" stroke-width="6"></circle>
+  <circle cx="340" cy="170" r="12" fill="#fff" stroke="#c62828" stroke-width="6"></circle>
+  <text x="50" y="85" font-family="Arial, sans-serif" font-size="22" fill="#111827" font-weight="700">Example: not valid yet (&lt; 3 vertices)</text>
+  <text x="50" y="115" font-family="Arial, sans-serif" font-size="16" fill="#374151">Red outline indicates you still need more points.</text>
+</svg>
