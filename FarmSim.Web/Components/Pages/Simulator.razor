@@ -1,13 +1,126 @@
 @page "/simulator"
 @inject IJSRuntime JS
+@implements IAsyncDisposable
+@using FarmSim.Core.Geo
+@using FarmSim.Core.Models
+@using System.Text.RegularExpressions
 
 <h1>Harvest Simulator</h1>
 
-<div id="map" style="width:100%;height:648px;" @ref="mapDiv"></div>
+@if (!_isCreatingField)
+{
+    <div class="fs-toolbar">
+        <button type="button" class="btn btn-primary fs-newfield" @onclick="OpenNewFieldInstructionsAsync" disabled="@(!_mapInitialized)">
+            New Field
+            <span class="fs-info" tabindex="0" aria-label="Information">
+                i
+                <span class="fs-tooltip">Draw the perimeter of a field where the harvest takes place.</span>
+            </span>
+        </button>
+    </div>
+}
+else
+{
+    <div class="fs-create-toolbar">
+        <button type="button" class="btn btn-outline-secondary" @onclick="OpenInstructionsInCreateModeAsync">Instructions</button>
+
+        <div class="fs-create-actions">
+            <button type="button" class="btn btn-secondary" @onclick="CancelFieldCreationAsync">Cancel</button>
+            <button type="button" class="btn btn-success" @onclick="OpenNameModalAsync" disabled="@(!CanDefine)">Define</button>
+        </div>
+    </div>
+}
+
+<div id="map" class="fs-map" @ref="mapDiv"></div>
+
+@if (_showInstructionsModal)
+{
+    <div class="fs-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="fs-instructions-title">
+        <div class="fs-modal-card">
+            <div class="fs-modal-header">
+                <div id="fs-instructions-title" class="fs-modal-title">Instructions</div>
+                <button type="button" class="fs-modal-close" @onclick="CloseInstructions">×</button>
+            </div>
+
+            <div class="fs-modal-body">
+                <p>
+                    Use the mouse to click and define the field boundary. Each click adds a vertex to the field.
+                    A valid field must have at least three vertices. You may define the boundary clockwise or anticlockwise,
+                    as long as you follow a continuous sequence of points. You can zoom using the mouse wheel and pan the map
+                    by clicking and dragging, provided you are not dragging a vertex.
+                </p>
+
+                <div class="fs-instructions-images">
+                    <img src="img/field-instructions-1.svg" alt="Field boundary example 1" />
+                    <img src="img/field-instructions-2.svg" alt="Field boundary example 2" />
+                </div>
+
+                <p>
+                    To remove a vertex, right-click on it. To move an existing vertex, hover over it, left-click and drag.
+                    When finished, click “Define”. At any time, click “Cancel” to stop creating the field.
+                </p>
+            </div>
+
+            @if (_showInstructionsFooter)
+            {
+                <div class="fs-modal-footer">
+                    <button type="button" class="btn btn-secondary" @onclick="CloseInstructions">Cancel</button>
+                    <button type="button" class="btn btn-primary" @onclick="StartFieldCreationFromModalAsync">Got it</button>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@if (_showNameModal)
+{
+    <div class="fs-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="fs-name-title">
+        <div class="fs-modal-card fs-modal-card-sm">
+            <div class="fs-modal-header">
+                <div id="fs-name-title" class="fs-modal-title">Name this field block:</div>
+                <button type="button" class="fs-modal-close" @onclick="CloseNameModal">×</button>
+            </div>
+
+            <div class="fs-modal-body">
+                <input class="form-control" @bind-value="FieldName" @bind-value:event="oninput" />
+                <div class="fs-name-help">Letters, numbers and spaces only.</div>
+            </div>
+
+            <div class="fs-modal-footer">
+                <button type="button" class="btn btn-secondary" @onclick="CloseNameModal">Cancel</button>
+                <button type="button" class="btn btn-success" @onclick="CreateFieldAsync" disabled="@(!CanCreateField)">Create</button>
+            </div>
+        </div>
+    </div>
+}
 
 @code {
     private ElementReference mapDiv;
     private bool _mapInitialized;
+
+    private bool _isCreatingField;
+    private bool _showInstructionsModal;
+    private bool _showInstructionsFooter;
+    private bool _showNameModal;
+    private string _fieldName = string.Empty;
+
+    // The selected vertex is used to insert new points in the middle of the sequence.
+    // -1 means "no selection".
+    private int _selectedVertexIndex = -1;
+
+    private readonly List<GeoPoint> _draftVertices = new();
+    private FieldBlock? _fieldBlock;
+
+    private DotNetObjectReference<Simulator>? _dotNetRef;
+
+    private bool CanDefine => _draftVertices.Count >= 3;
+    private bool CanCreateField => IsValidFieldName(_fieldName);
+
+    private string FieldName
+    {
+        get => _fieldName;
+        set => _fieldName = SanitizeFieldName(value ?? string.Empty);
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -20,6 +133,8 @@
             // ✅ 2) Create the map
             await JS.InvokeVoidAsync("maps.initializeMap", mapDiv, -23.55052, -46.633308, 12);
             _mapInitialized = true;
+            // Re-render so UI elements that depend on map readiness (e.g., the New Field button) get enabled.
+            await InvokeAsync(StateHasChanged);
             await JS.InvokeVoidAsync("console.log", "Simulator: map initialized");
         }
         catch (InvalidOperationException)
@@ -36,5 +151,304 @@
             // - some exception in JS
             Console.Error.WriteLine(ex);
         }
+    }
+
+    private Task OpenNewFieldInstructionsAsync()
+    {
+        _showInstructionsFooter = true;
+        _showInstructionsModal = true;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task OpenInstructionsInCreateModeAsync()
+    {
+        _showInstructionsFooter = false;
+        _showInstructionsModal = true;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void CloseInstructions()
+    {
+        _showInstructionsModal = false;
+    }
+
+    private async Task StartFieldCreationFromModalAsync()
+    {
+        _showInstructionsModal = false;
+        _showInstructionsFooter = false;
+        await EnterFieldCreationModeAsync();
+    }
+
+    private async Task EnterFieldCreationModeAsync()
+    {
+        if (!_mapInitialized)
+        {
+            // The UI is interactive, but the map is not ready yet.
+            // Just exit silently; the user can retry once the map finishes loading.
+            return;
+        }
+
+        _isCreatingField = true;
+        _draftVertices.Clear();
+        _selectedVertexIndex = -1;
+        _fieldName = string.Empty;
+        _showNameModal = false;
+        _fieldBlock = null;
+
+        _dotNetRef ??= DotNetObjectReference.Create(this);
+
+        try
+        {
+            // Reset any previously created field and remove map restrictions.
+            await JS.InvokeVoidAsync("maps.clearFinalField", mapDiv);
+
+            // Start listening to map events and render an empty draft.
+            await JS.InvokeVoidAsync("maps.beginFieldCreation", mapDiv, _dotNetRef);
+            await RenderDraftAsync();
+        }
+        catch (InvalidOperationException)
+        {
+            // If prerendering (SSR), JS interop is not yet available.
+        }
+        catch (JSException ex)
+        {
+            Console.Error.WriteLine(ex);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task CancelFieldCreationAsync()
+    {
+        _isCreatingField = false;
+        _draftVertices.Clear();
+        _selectedVertexIndex = -1;
+        _fieldName = string.Empty;
+        _showInstructionsModal = false;
+        _showInstructionsFooter = false;
+        _showNameModal = false;
+
+        try
+        {
+            await JS.InvokeVoidAsync("maps.cancelFieldCreation", mapDiv);
+        }
+        catch (InvalidOperationException)
+        {
+            // If prerendering (SSR), JS interop is not yet available.
+        }
+        catch (JSException ex)
+        {
+            Console.Error.WriteLine(ex);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task OpenNameModalAsync()
+    {
+        if (!CanDefine) return Task.CompletedTask;
+        _showNameModal = true;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void CloseNameModal()
+    {
+        _showNameModal = false;
+    }
+
+    private static string SanitizeFieldName(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return string.Empty;
+
+        // Keep only ASCII letters, digits, and spaces.
+        // This guarantees consistency with the validation rules.
+        var buffer = new char[raw.Length];
+        int len = 0;
+        foreach (char c in raw)
+        {
+            if ((c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == ' ')
+            {
+                buffer[len++] = c;
+            }
+        }
+
+        return new string(buffer, 0, len);
+    }
+
+    private static bool IsValidFieldName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+
+        // Must not start or end with space.
+        if (!string.Equals(name, name.Trim(), StringComparison.Ordinal)) return false;
+
+        // Only ASCII letters, digits, and spaces.
+        if (!Regex.IsMatch(name, "^[A-Za-z0-9 ]+$")) return false;
+
+        // Must contain at least one letter or number.
+        return Regex.IsMatch(name, "[A-Za-z0-9]");
+    }
+
+    private async Task CreateFieldAsync()
+    {
+        if (!CanDefine || !IsValidFieldName(_fieldName)) return;
+
+        // Persist a copy of the boundary.
+        var boundary = _draftVertices.ToList();
+        double area = GeoMath.CalculateSphericalPolygonAreaSquareMeters(boundary);
+        _fieldBlock = new FieldBlock(_fieldName, boundary, area);
+
+        // Leave creation mode.
+        _isCreatingField = false;
+        _showNameModal = false;
+        _showInstructionsModal = false;
+        _showInstructionsFooter = false;
+
+        // Clear draft state; the final polygon remains drawn by JS.
+        _draftVertices.Clear();
+        _selectedVertexIndex = -1;
+        _fieldName = string.Empty;
+
+        try
+        {
+            await JS.InvokeVoidAsync("maps.cancelFieldCreation", mapDiv);
+            await JS.InvokeVoidAsync("maps.renderFinalField", mapDiv, _fieldBlock.Boundary);
+        }
+        catch (InvalidOperationException)
+        {
+            // If prerendering (SSR), JS interop is not yet available.
+        }
+        catch (JSException ex)
+        {
+            Console.Error.WriteLine(ex);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnMapClick(double lat, double lng)
+    {
+        if (!_isCreatingField) return;
+
+        int insertIndex = GetInsertIndexForNewVertex();
+        _draftVertices.Insert(insertIndex, new GeoPoint(lat, lng));
+        _selectedVertexIndex = insertIndex;
+
+        await RenderDraftAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnVertexSelect(int index)
+    {
+        if (!_isCreatingField) return;
+        if (index < 0 || index >= _draftVertices.Count) return;
+
+        _selectedVertexIndex = index;
+        await RenderDraftAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnVertexRightClick(int index)
+    {
+        if (!_isCreatingField) return;
+        if (index < 0 || index >= _draftVertices.Count) return;
+
+        _draftVertices.RemoveAt(index);
+        UpdateSelectionAfterRemoval(index);
+
+        await RenderDraftAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnVertexDragEnd(int index, double lat, double lng)
+    {
+        if (!_isCreatingField) return;
+        if (index < 0 || index >= _draftVertices.Count) return;
+
+        _draftVertices[index] = new GeoPoint(lat, lng);
+        if (_selectedVertexIndex < 0 || _selectedVertexIndex >= _draftVertices.Count)
+        {
+            _selectedVertexIndex = _draftVertices.Count - 1;
+        }
+
+        await RenderDraftAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private int GetInsertIndexForNewVertex()
+    {
+        // If nothing is selected, the default selection is the last vertex.
+        if (_draftVertices.Count > 0 && (_selectedVertexIndex < 0 || _selectedVertexIndex >= _draftVertices.Count))
+        {
+            _selectedVertexIndex = _draftVertices.Count - 1;
+        }
+
+        if (_selectedVertexIndex >= 0 && _selectedVertexIndex < _draftVertices.Count)
+        {
+            return _selectedVertexIndex + 1;
+        }
+
+        return _draftVertices.Count;
+    }
+
+    private void UpdateSelectionAfterRemoval(int removedIndex)
+    {
+        if (_draftVertices.Count == 0)
+        {
+            _selectedVertexIndex = -1;
+            return;
+        }
+
+        if (_selectedVertexIndex > removedIndex)
+        {
+            _selectedVertexIndex--;
+        }
+        else if (_selectedVertexIndex == removedIndex)
+        {
+            // Keep selection near the removed vertex.
+            _selectedVertexIndex = Math.Min(removedIndex, _draftVertices.Count - 1);
+        }
+
+        if (_selectedVertexIndex < 0 || _selectedVertexIndex >= _draftVertices.Count)
+        {
+            _selectedVertexIndex = _draftVertices.Count - 1;
+        }
+    }
+
+    private async Task RenderDraftAsync()
+    {
+        if (!_mapInitialized) return;
+
+        if (_draftVertices.Count > 0 && (_selectedVertexIndex < 0 || _selectedVertexIndex >= _draftVertices.Count))
+        {
+            _selectedVertexIndex = _draftVertices.Count - 1;
+        }
+
+        await JS.InvokeVoidAsync("maps.renderDraftField", mapDiv, _draftVertices, _selectedVertexIndex);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (_mapInitialized)
+            {
+                await JS.InvokeVoidAsync("maps.cancelFieldCreation", mapDiv);
+            }
+        }
+        catch
+        {
+            // Ignore disposal errors.
+        }
+
+        _dotNetRef?.Dispose();
+        _dotNetRef = null;
     }
 }
