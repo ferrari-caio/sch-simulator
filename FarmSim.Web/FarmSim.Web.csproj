@@ -6,4 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\FarmSim.Core\FarmSim.Core.csproj" />
+  </ItemGroup>
+
 </Project>
